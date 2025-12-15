@@ -1,6 +1,7 @@
 import os
 from uuid import UUID
 from typing import Optional
+from fastapi.middleware.cors import CORSMiddleware
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
@@ -24,7 +25,13 @@ print("KEY:", SUPABASE_KEY[:30])
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI(title="Vetcent API", version="0.1.0")
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # şimdilik sadece local frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------------------------
 # MODELLER
