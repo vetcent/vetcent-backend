@@ -694,3 +694,20 @@ def submit_order(payload: dict):
         "message": "order_created",
         "order_id": order_id
     }
+
+# --- 44) MY ORDERS (clinic order history)
+@app.get("/orders/{clinic_user_id}")
+def get_orders(clinic_user_id: UUID):
+    try:
+        res = (
+            supabase
+            .table("orders")
+            .select("id, status, total_amount, created_at")
+            .eq("clinic_user_id", str(clinic_user_id))
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"clinic_user_id": str(clinic_user_id), "orders": res.data or []}
