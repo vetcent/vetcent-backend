@@ -660,3 +660,37 @@ def create_order(payload: OrderCreateRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"orders error: {str(e)}")
+
+# --- 30b) ORDER SUBMIT (checkout)
+@app.post("/orders/submit")
+def submit_order(payload: dict):
+    clinic_user_id = payload.get("clinic_user_id")
+
+    if not clinic_user_id:
+        raise HTTPException(status_code=400, detail="clinic_user_id gerekli")
+
+    # draft order bul
+    order_res = (
+        supabase
+        .table("orders")
+        .select("id")
+        .eq("clinic_user_id", clinic_user_id)
+        .eq("status", "draft")
+        .limit(1)
+        .execute()
+    )
+
+    if not order_res.data:
+        raise HTTPException(status_code=404, detail="Draft order bulunamadı")
+
+    order_id = order_res.data[0]["id"]
+
+    # status -> submitted
+    supabase.table("orders").update({
+        "status": "submitted"
+    }).eq("id", order_id).execute()
+
+    return {
+        "message": "order_created",
+        "order_id": order_id
+    }
