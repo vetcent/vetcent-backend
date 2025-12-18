@@ -711,3 +711,34 @@ def get_orders(clinic_user_id: UUID):
         raise HTTPException(status_code=500, detail=str(e))
 
     return {"clinic_user_id": str(clinic_user_id), "orders": res.data or []}
+
+# --- 45) SUPPLIER - MY PRICES
+@app.get("/supplier/my-prices/{supplier_id}")
+def supplier_my_prices(supplier_id: UUID):
+    try:
+        res = (
+            supabase
+            .table("supplier_prices")
+            .select("""
+                id,
+                price,
+                stock,
+                delivery_days,
+                is_active,
+                created_at,
+                product_id,
+                supplier_id,
+                products (
+                    id,
+                    name,
+                    unit,
+                    brand
+                )
+            """)
+            .eq("supplier_id", str(supplier_id))
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return {"supplier_id": str(supplier_id), "items": res.data or []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
