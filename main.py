@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header
 from pydantic import BaseModel
 from supabase import create_client, Client
 
@@ -48,7 +48,8 @@ class LoginRequest(BaseModel):
 
 
 class SupplierPriceCreate(BaseModel):
-    supplier_id: UUID
+    # ✅ supplier_id opsiyonel (istersen frontend gönderebilir; ileride token’dan alırız)
+    supplier_id: Optional[UUID] = None
     product_id: UUID
     price: float
     stock: int = 0
@@ -63,7 +64,6 @@ class SupplierPriceUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
-# --- 29) CART MODELLER (senin order_items şemana göre)
 class CartAddItem(BaseModel):
     clinic_user_id: UUID
     product_id: UUID
@@ -71,7 +71,6 @@ class CartAddItem(BaseModel):
     quantity: int = 1
 
 
-# --- 30) ORDER CREATE (checkout / submit) model
 class OrderCreateRequest(BaseModel):
     clinic_user_id: UUID
 
@@ -80,9 +79,6 @@ class OrderCreateRequest(BaseModel):
 # HELPERS
 # -------------------------
 def _recalc_and_update_order_total(order_id: str) -> float:
-    """
-    order_items'tan toplamı hesaplar, orders.total_amount'u günceller.
-    """
     items_res = (
         supabase
         .table("order_items")
@@ -110,7 +106,6 @@ def health():
     return {"status": "ok"}
 
 
-# --- 23) PRODUCTS (master list)
 @app.get("/products")
 def get_products():
     try:
@@ -135,7 +130,6 @@ def get_products():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 26) SEARCH
 @app.get("/products/search")
 def search_products(
     q: Optional[str] = None,
@@ -192,7 +186,6 @@ def search_products(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 25) CATEGORIES
 @app.get("/categories")
 def get_categories():
     try:
@@ -208,7 +201,6 @@ def get_categories():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# (Opsiyonel helper)
 @app.get("/brands")
 def get_brands():
     try:
@@ -243,7 +235,7 @@ def get_units():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 21) SIGNUP
+# --- 21) SIGNUP (✅ FIX)
 @app.post("/signup")
 def signup(payload: SignupRequest):
     email = payload.email.strip().lower()
@@ -253,22 +245,29 @@ def signup(payload: SignupRequest):
         raise HTTPException(status_code=400, detail="role sadece 'clinic' veya 'supplier' olabilir")
 
     try:
-        auth_res = supabase.auth.sign_up({"email": email, "password": payload.password})
+        # ✅ role bilgisini metadata olarak Supabase Auth'a gönderiyoruz
+        # ✅ profiles + (supplier ise) suppliers tablosu TRIGGER ile otomatik oluşacak
+        auth_res = supabase.auth.sign_up({
+            "email": email,
+            "password": payload.password,
+            "options": {
+                "data": {
+                    "role": role,
+                    "name": email
+                }
+            }
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Auth sign_up hata: {str(e)}")
 
     user = getattr(auth_res, "user", None)
     if not user or not getattr(user, "id", None):
-        raise HTTPException(status_code=400, detail="Kayıt oluşmadı (email doğrulama açık olabilir veya email kayıtlı olabilir).")
+        raise HTTPException(
+            status_code=400,
+            detail="Kayıt oluşmadı (email doğrulama açık olabilir veya email kayıtlı olabilir)."
+        )
 
-    user_id = user.id
-
-    try:
-        supabase.table("profiles").insert({"user_id": user_id, "role": role}).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"profiles insert hata: {str(e)}")
-
-    return {"message": "Kayıt başarılı", "user_id": user_id, "role": role}
+    return {"message": "Kayıt başarılı", "user_id": user.id, "role": role}
 
 
 # --- 22) LOGIN
@@ -313,7 +312,6 @@ def login(payload: LoginRequest):
     }
 
 
-# --- 24) PRODUCT OFFERS (supplier_prices)
 @app.get("/products/{product_id}/offers")
 def get_product_offers(product_id: UUID):
     try:
@@ -333,7 +331,6 @@ def get_product_offers(product_id: UUID):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 27) PRODUCT BEST OFFER
 @app.get("/products/{product_id}/best-offer")
 def get_product_best_offer(product_id: UUID):
     try:
@@ -365,15 +362,20 @@ def get_product_best_offer(product_id: UUID):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 28) SUPPLIER PRICE CRUD
+# --- 28) SUPPLIER PRICE CRUD (✅ küçük iyileştirme)
 @app.post("/supplier/prices")
-def create_supplier_price(payload: SupplierPriceCreate):
+def create_supplier_price(payload: SupplierPriceCreate, authorization: Optional[str] = Header(None)):
     if payload.price <= 0:
         raise HTTPException(status_code=400, detail="price > 0 olmalı")
     if payload.stock < 0:
         raise HTTPException(status_code=400, detail="stock negatif olamaz")
     if payload.delivery_days <= 0:
         raise HTTPException(status_code=400, detail="delivery_days > 0 olmalı")
+
+    # ✅ supplier_id boş gelirse, şimdilik body zorunlu gibi davranalım
+    # (Bir sonraki adımda token doğrulayıp supplier_id'yi token'dan alacağız)
+    if payload.supplier_id is None:
+        raise HTTPException(status_code=400, detail="supplier_id gerekli")
 
     try:
         res = (
@@ -445,7 +447,6 @@ def add_to_cart(payload: CartAddItem):
         if payload.quantity <= 0:
             raise HTTPException(status_code=400, detail="quantity > 0 olmalı")
 
-        # 1) clinic için draft order bul / yoksa oluştur
         order_res = (
             supabase
             .table("orders")
@@ -471,7 +472,6 @@ def add_to_cart(payload: CartAddItem):
             )
             order_id = new_order.data[0]["id"]
 
-        # 2) supplier_prices'tan bu ürün+supplier fiyatını çek
         sp = (
             supabase
             .table("supplier_prices")
@@ -491,7 +491,6 @@ def add_to_cart(payload: CartAddItem):
 
         unit_price = sp.data["price"]
 
-        # 3) Sepette aynı product_id + supplier_id var mı? (varsa qty artır)
         item_res = (
             supabase
             .table("order_items")
@@ -598,17 +597,9 @@ def get_cart(clinic_user_id: UUID):
         raise HTTPException(status_code=500, detail=f"cart/get error: {str(e)}")
 
 
-# -------------------------
-# 30) ORDER CREATE ENDPOINT (Sepeti siparişe çevir)
-# - draft sepeti bulur
-# - boşsa hata verir
-# - toplamı recalculation yapar
-# - status'u submitted yapar
-# -------------------------
 @app.post("/orders")
 def create_order(payload: OrderCreateRequest):
     try:
-        # 1) draft order bul
         draft_res = (
             supabase
             .table("orders")
@@ -624,7 +615,6 @@ def create_order(payload: OrderCreateRequest):
 
         order_id = draft_res.data[0]["id"]
 
-        # 2) order_items var mı?
         items_res = (
             supabase
             .table("order_items")
@@ -636,17 +626,9 @@ def create_order(payload: OrderCreateRequest):
         if len(items) == 0:
             raise HTTPException(status_code=400, detail="Sepet boş. Sipariş oluşturulamaz.")
 
-        # 3) total hesapla ve orders.total_amount güncelle
         total_amount = _recalc_and_update_order_total(order_id)
 
-        # 4) status'u submitted yap
-        updated = (
-            supabase
-            .table("orders")
-            .update({"status": "submitted", "total_amount": total_amount})
-            .eq("id", order_id)
-            .execute()
-        )
+        supabase.table("orders").update({"status": "submitted", "total_amount": total_amount}).eq("id", order_id).execute()
 
         return {
             "message": "order_created",
@@ -661,7 +643,7 @@ def create_order(payload: OrderCreateRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"orders error: {str(e)}")
 
-# --- 30b) ORDER SUBMIT (checkout)
+
 @app.post("/orders/submit")
 def submit_order(payload: dict):
     clinic_user_id = payload.get("clinic_user_id")
@@ -669,7 +651,6 @@ def submit_order(payload: dict):
     if not clinic_user_id:
         raise HTTPException(status_code=400, detail="clinic_user_id gerekli")
 
-    # draft order bul
     order_res = (
         supabase
         .table("orders")
@@ -685,17 +666,11 @@ def submit_order(payload: dict):
 
     order_id = order_res.data[0]["id"]
 
-    # status -> submitted
-    supabase.table("orders").update({
-        "status": "submitted"
-    }).eq("id", order_id).execute()
+    supabase.table("orders").update({"status": "submitted"}).eq("id", order_id).execute()
 
-    return {
-        "message": "order_created",
-        "order_id": order_id
-    }
+    return {"message": "order_created", "order_id": order_id}
 
-# --- 44) MY ORDERS (clinic order history)
+
 @app.get("/orders/{clinic_user_id}")
 def get_orders(clinic_user_id: UUID):
     try:
@@ -712,7 +687,7 @@ def get_orders(clinic_user_id: UUID):
 
     return {"clinic_user_id": str(clinic_user_id), "orders": res.data or []}
 
-# --- 45) SUPPLIER - MY PRICES
+
 @app.get("/supplier/my-prices/{supplier_id}")
 def supplier_my_prices(supplier_id: UUID):
     try:
