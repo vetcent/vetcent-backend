@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from supabase import create_client, Client
 
@@ -19,8 +19,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL veya SUPABASE_KEY .env içinde bulunamadı!")
 
-# Debug: hangi key okunuyor? (istersen sonra sil)
-print("KEY:", SUPABASE_KEY[:30])
+# ⚠️ Güvenlik: prod'da key print etme (istersen debug için aç)
+# print("KEY:", SUPABASE_KEY[:30])
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -48,8 +48,7 @@ class LoginRequest(BaseModel):
 
 
 class SupplierPriceCreate(BaseModel):
-    # ✅ supplier_id opsiyonel (istersen frontend gönderebilir; ileride token’dan alırız)
-    supplier_id: Optional[UUID] = None
+    supplier_id: UUID
     product_id: UUID
     price: float
     stock: int = 0
@@ -106,6 +105,7 @@ def health():
     return {"status": "ok"}
 
 
+# --- 23) PRODUCTS (master list)
 @app.get("/products")
 def get_products():
     try:
@@ -130,6 +130,7 @@ def get_products():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- 26) SEARCH
 @app.get("/products/search")
 def search_products(
     q: Optional[str] = None,
@@ -186,6 +187,7 @@ def search_products(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- 25) CATEGORIES
 @app.get("/categories")
 def get_categories():
     try:
@@ -201,6 +203,7 @@ def get_categories():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# (Opsiyonel helper)
 @app.get("/brands")
 def get_brands():
     try:
@@ -235,7 +238,7 @@ def get_units():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 21) SIGNUP (✅ FIX)
+# --- 21) SIGNUP (✅ FIX: profiles insert YOK, role metadata VAR)
 @app.post("/signup")
 def signup(payload: SignupRequest):
     email = payload.email.strip().lower()
@@ -245,8 +248,6 @@ def signup(payload: SignupRequest):
         raise HTTPException(status_code=400, detail="role sadece 'clinic' veya 'supplier' olabilir")
 
     try:
-        # ✅ role bilgisini metadata olarak Supabase Auth'a gönderiyoruz
-        # ✅ profiles + (supplier ise) suppliers tablosu TRIGGER ile otomatik oluşacak
         auth_res = supabase.auth.sign_up({
             "email": email,
             "password": payload.password,
@@ -267,7 +268,10 @@ def signup(payload: SignupRequest):
             detail="Kayıt oluşmadı (email doğrulama açık olabilir veya email kayıtlı olabilir)."
         )
 
-    return {"message": "Kayıt başarılı", "user_id": user.id, "role": role}
+    user_id = user.id
+
+    # ❌ profiles insert kaldırıldı. (Trigger otomatik yapacak)
+    return {"message": "Kayıt başarılı", "user_id": user_id, "role": role}
 
 
 # --- 22) LOGIN
@@ -312,6 +316,7 @@ def login(payload: LoginRequest):
     }
 
 
+# --- 24) PRODUCT OFFERS (supplier_prices)
 @app.get("/products/{product_id}/offers")
 def get_product_offers(product_id: UUID):
     try:
@@ -331,6 +336,7 @@ def get_product_offers(product_id: UUID):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- 27) PRODUCT BEST OFFER
 @app.get("/products/{product_id}/best-offer")
 def get_product_best_offer(product_id: UUID):
     try:
@@ -362,20 +368,15 @@ def get_product_best_offer(product_id: UUID):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 28) SUPPLIER PRICE CRUD (✅ küçük iyileştirme)
+# --- 28) SUPPLIER PRICE CRUD
 @app.post("/supplier/prices")
-def create_supplier_price(payload: SupplierPriceCreate, authorization: Optional[str] = Header(None)):
+def create_supplier_price(payload: SupplierPriceCreate):
     if payload.price <= 0:
         raise HTTPException(status_code=400, detail="price > 0 olmalı")
     if payload.stock < 0:
         raise HTTPException(status_code=400, detail="stock negatif olamaz")
     if payload.delivery_days <= 0:
         raise HTTPException(status_code=400, detail="delivery_days > 0 olmalı")
-
-    # ✅ supplier_id boş gelirse, şimdilik body zorunlu gibi davranalım
-    # (Bir sonraki adımda token doğrulayıp supplier_id'yi token'dan alacağız)
-    if payload.supplier_id is None:
-        raise HTTPException(status_code=400, detail="supplier_id gerekli")
 
     try:
         res = (
@@ -447,6 +448,7 @@ def add_to_cart(payload: CartAddItem):
         if payload.quantity <= 0:
             raise HTTPException(status_code=400, detail="quantity > 0 olmalı")
 
+        # 1) clinic için draft order bul / yoksa oluştur
         order_res = (
             supabase
             .table("orders")
@@ -472,6 +474,7 @@ def add_to_cart(payload: CartAddItem):
             )
             order_id = new_order.data[0]["id"]
 
+        # 2) supplier_prices'tan bu ürün+supplier fiyatını çek
         sp = (
             supabase
             .table("supplier_prices")
@@ -491,6 +494,7 @@ def add_to_cart(payload: CartAddItem):
 
         unit_price = sp.data["price"]
 
+        # 3) Sepette aynı product_id + supplier_id var mı? (varsa qty artır)
         item_res = (
             supabase
             .table("order_items")
@@ -628,7 +632,13 @@ def create_order(payload: OrderCreateRequest):
 
         total_amount = _recalc_and_update_order_total(order_id)
 
-        supabase.table("orders").update({"status": "submitted", "total_amount": total_amount}).eq("id", order_id).execute()
+        updated = (
+            supabase
+            .table("orders")
+            .update({"status": "submitted", "total_amount": total_amount})
+            .eq("id", order_id)
+            .execute()
+        )
 
         return {
             "message": "order_created",
@@ -666,9 +676,14 @@ def submit_order(payload: dict):
 
     order_id = order_res.data[0]["id"]
 
-    supabase.table("orders").update({"status": "submitted"}).eq("id", order_id).execute()
+    supabase.table("orders").update({
+        "status": "submitted"
+    }).eq("id", order_id).execute()
 
-    return {"message": "order_created", "order_id": order_id}
+    return {
+        "message": "order_created",
+        "order_id": order_id
+    }
 
 
 @app.get("/orders/{clinic_user_id}")
